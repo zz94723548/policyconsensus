@@ -19,6 +19,7 @@ from modular_policy.env.rlbench.factory import get_subtasks
 from modular_policy.env_runner.base_runner import BaseRunner, obs_dropout
 from modular_policy.policy.base_policy import BasePolicy
 from modular_policy.common.pytorch_util import dict_apply
+from modular_policy.common.video_weight_overlay import annotate_policy_weights
 
 from typing import Optional, List
 
@@ -31,6 +32,20 @@ def merge_obs_dicts(obs_dicts):
         key: np.stack([obs_dict[key] for obs_dict in obs_dicts])
         for key in obs_dicts[0].keys()
     }
+
+
+def get_policy_weight_labels(policy: BasePolicy) -> List[str]:
+    modality_names = {
+        'rgb': 'RGB',
+        'pointcloud': 'PointCloud',
+        'dino_pointcloud': 'DINO',
+    }
+    return [
+        f"{modality_names.get(modality, modality)} E{expert_idx + 1}"
+        for modality in getattr(policy, 'modalities', [])
+        if modality != 'robot_state'
+        for expert_idx in range(getattr(policy, 'num_modules', 1))
+    ]
 
 
 class RlbenchParallelRunner(BaseRunner):
@@ -107,7 +122,7 @@ class RlbenchParallelRunner(BaseRunner):
                             RlbenchEnv(
                                 task_name=task_name,
                                 image_size=image_size,
-                                num_points=512, # num_points,
+                                num_points=num_points,
                                 enable_depth=enable_depth,
                                 enable_dino=enable_dino,
                                 process_dino=True,
@@ -274,7 +289,20 @@ class RlbenchParallelRunner(BaseRunner):
             all_avg_weights[this_global_slice] = avg_weights
 
             # collect data for this round
-            all_video_paths[this_global_slice] = self.env.render()[this_local_slice]
+            video_paths = self.env.render()[this_local_slice]
+            annotated_video_paths = []
+            weight_labels = get_policy_weight_labels(policy)
+            for env_i, video_path in enumerate(video_paths):
+                weights_history = chunk_episode_weights[env_i]
+                if video_path is not None and weights_history:
+                    video_path = annotate_policy_weights(
+                        video_path=video_path,
+                        decision_weights=weights_history,
+                        labels=weight_labels,
+                        frames_per_decision=self.n_action_steps,
+                    )
+                annotated_video_paths.append(video_path)
+            all_video_paths[this_global_slice] = annotated_video_paths
 
         # clear out video buffer
         _ = self.env.reset()
@@ -464,6 +492,7 @@ class RlbenchNonParallelRunner(BaseRunner):
             # obs, _ = self.env.reset(seed=42)    # NOTE: seeding happens here, init_fn has bug
             obs, _ = self.env.reset()
             policy.reset()
+            episode_weights = []
 
             pbar = tqdm.tqdm(
                 total=self.max_episode_steps,
@@ -483,10 +512,14 @@ class RlbenchNonParallelRunner(BaseRunner):
 
                 # run policy
                 with torch.inference_mode():
-                    action = policy.predict_action({
+                    policy_output = policy.predict_action({
                         port: obs_dict[port] 
                         for port in policy.get_observation_ports()
-                    })['action'].detach().cpu().numpy().squeeze(0)
+                    })
+                    action = policy_output['action'].detach().cpu().numpy().squeeze(0)
+                    raw_weights = policy_output.get('weights', None)
+                    if raw_weights is not None:
+                        episode_weights.append(raw_weights[0].detach().cpu())
 
                 # step env
                 obs, reward, done, _, _ = self.env.step(action)
@@ -498,7 +531,15 @@ class RlbenchNonParallelRunner(BaseRunner):
             pbar.close()
 
             # collect data for this round
-            all_video_paths[test_i] = self.env.render()
+            video_path = self.env.render()
+            if video_path is not None and episode_weights:
+                video_path = annotate_policy_weights(
+                    video_path=video_path,
+                    decision_weights=episode_weights,
+                    labels=get_policy_weight_labels(policy),
+                    frames_per_decision=self.n_action_steps,
+                )
+            all_video_paths[test_i] = video_path
 
         # clear out video buffer
         _ = self.env.reset()

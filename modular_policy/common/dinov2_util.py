@@ -10,7 +10,12 @@ from typing import Optional
 
 
 def load_dino_model(name: str = 'dinov2_vits14'):
-    dino_model = torch.hub.load('facebookresearch/dinov2', name)
+    dino_model = torch.hub.load(
+        'facebookresearch/dinov2:b48308a',
+        name,
+        trust_repo=True,
+        skip_validation=True,
+    )
     dino_model.eval()
     return dino_model
 

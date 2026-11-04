@@ -1,0 +1,15 @@
+defaults:
+  - train_dp_unets_spec_rgb_pcd
+  - override task: rlbench/mt4_rgb_pcd
+  - _self_
+
+name: train_rgb_pcd_experts
+_target_: modular_policy.workspace.train_two_stage_policy.TrainTwoStagePolicyWorkspace
+
+policy:
+  num_modules: 1
+  training_stage: experts
+
+training:
+  num_demo: 200
+  resume: false

@@ -32,6 +32,7 @@ class DiffusionUnetsPolicy(DiffusionUnetsBase):
         cond_predict_scale: bool = True,
         composition_strategy: str = "soft_gating",  # Options: soft_gating, hard_routing, topk_moe
         topk: int = 2,  # Only used for top-k MoE
+        training_stage: str = "joint",
         # parameters passed to step
         **kwargs
     ):
@@ -132,6 +133,14 @@ class DiffusionUnetsPolicy(DiffusionUnetsBase):
         self.composition_strategy = composition_strategy
         self.topk = topk
         assert composition_strategy in ["soft_gating", "hard_routing", "topk_moe"]
+        if training_stage not in ("joint", "experts", "router"):
+            raise ValueError(f"Unknown training stage: {training_stage}")
+        if training_stage != "joint" and (num_modules != 1 or len(models) != 2):
+            raise ValueError("Two-stage training requires exactly two modalities and num_modules=1")
+        if training_stage == "router" and composition_strategy != "soft_gating":
+            raise ValueError("Router training requires differentiable soft_gating")
+        self.training_stage = training_stage
+        self.last_expert_losses = {}
 
         self.kwargs = kwargs
 
@@ -280,7 +289,12 @@ class DiffusionUnetsPolicy(DiffusionUnetsBase):
 
 
         global_cond = torch.cat(list(features.values()), dim=-1)
-        weights = self.weight_predictor(global_cond).transpose(0, 1)
+        # Experts-stage checkpoints have no trained router: use equal weights
+        # for the aggregate preview, rather than random router logits.
+        if self.training_stage == "experts":
+            weights = global_cond.new_zeros((len(self.models), B))
+        else:
+            weights = self.weight_predictor(global_cond).transpose(0, 1)
 
         # self.log_weights(weights)
         # print(
@@ -348,6 +362,18 @@ class DiffusionUnetsPolicy(DiffusionUnetsBase):
         ).long()
         noisy_trajectory = self.noise_scheduler.add_noise(
             trajectory, noise, timesteps)
+
+        if self.training_stage == "experts":
+            assert self.noise_scheduler.config.prediction_type == 'epsilon'
+            losses = [
+                F.mse_loss(model(noisy_trajectory, timesteps, global_cond=cond), noise)
+                for model, cond in zip(self.models, global_conds)
+            ]
+            names = [m for m in self.modalities if m != 'robot_state']
+            self.last_expert_losses = {
+                name: loss.detach() for name, loss in zip(names, losses)
+            }
+            return torch.stack(losses).mean()
         
         weights = self.weight_predictor(global_cond).transpose(0, 1)
 
@@ -408,6 +434,7 @@ class DiffusionUnetsPolicy(DiffusionUnetsBase):
             for model in self.models:
                 model.requires_grad_(False)
             self.obs_encoder.requires_grad_(False)
+            self.weight_predictor.requires_grad_(True)
             self.weight_predictor.train()
         elif method == 'weight_predictor+obs_encoder':
             # freeze all parameters except for the weight predictor and obs_encoder

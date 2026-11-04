@@ -52,10 +52,12 @@ def make_json_safe(obj):
 @click.option('-c', '--checkpoint', required=True, help="either a .ckpt file or a directory containing .ckpt files")
 @click.option('-o', '--output_dir', required=True, help="output directory for eval info dump")
 @click.option('-n', '--num_exp', default=3, help="num experiments to run")
+@click.option('--num-videos', type=click.IntRange(min=0), default=None,
+              help="number of episodes to record videos for (defaults to checkpoint config)")
 @click.option('-d', '--device', default='cuda:0', help="device to run on")
 @click.option('-u', '--update', is_flag=True, help="weather to update `success_rate` in ckpt file name")
 @click.option('-s', '--dropout_obs', default=(), multiple=True, help="a list of sensor ports to drop i.e. set to 0s")
-def eval_policy_sim(checkpoint, output_dir, num_exp, device, update, dropout_obs):
+def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update, dropout_obs):
     if os.path.exists(output_dir):
         click.confirm(f"Output path {output_dir} already exists! Overwrite?", abort=True)
     pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -205,7 +207,17 @@ def eval_policy_sim(checkpoint, output_dir, num_exp, device, update, dropout_obs
             output_dir=output_dir,
             obs_to_drop=dropout_obs,
             # n_parallel_envs = 25, 
-            n_test=num_exp  
+            n_test=num_exp,
+            n_parallel_envs=min(
+                num_exp,
+                # cfg.task.env_runner.get('n_parallel_envs', num_exp)
+                4,
+            ),
+            n_test_vis=min(
+                num_exp,
+                num_videos if num_videos is not None
+                else cfg.task.env_runner.get('n_test_vis', num_exp)
+            )
         )
         runner_log = env_runner.run(policy)
         env_runner.close()
