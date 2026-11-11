@@ -23,6 +23,7 @@ demo_data_raw/
 *.ckpt
 *.pth
 *.pt
+*.tar.gz
 
 # Temporary and cache files
 *.pyc

@@ -3,6 +3,7 @@ from gymnasium import spaces
 import numpy as np
 from collections import defaultdict, deque
 import dill
+import copy
 
 def stack_repeated(x, n):
     return np.repeat(np.expand_dims(x,axis=0),n,axis=0)
@@ -151,6 +152,33 @@ class MultiStepWrapper(gymnasium.Wrapper):
     
     def get_rewards(self):
         return self.reward
+
+    def get_branch_state(self):
+        if not hasattr(self.env, 'get_branch_state'):
+            raise AttributeError('Wrapped environment has no branch-state API')
+        return {
+            'env_state': self.env.get_branch_state(),
+            'obs': copy.deepcopy(self.obs),
+            'reward': copy.deepcopy(self.reward),
+            'done': copy.deepcopy(self.done),
+            'truncate': copy.deepcopy(self.truncate),
+            'info': copy.deepcopy(self.info),
+        }
+
+    def set_branch_state(self, state):
+        restored_observation = self.env.set_branch_state(state['env_state'])
+        self.obs = copy.deepcopy(state['obs'])
+        self.reward = copy.deepcopy(state['reward'])
+        self.done = copy.deepcopy(state['done'])
+        self.truncate = copy.deepcopy(state['truncate'])
+        self.info = copy.deepcopy(state['info'])
+        return restored_observation
+
+    def get_branch_object_state(self):
+        return self.env.get_branch_object_state()
+
+    def get_current_observation(self):
+        return self._get_obs(self.n_obs_steps)
     
     def get_attr(self, name):
         return getattr(self, name)

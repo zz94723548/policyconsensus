@@ -156,6 +156,29 @@ class DiffusionUnetsPolicy(DiffusionUnetsBase):
             f"    {num_vision_params} perception params\n"
         )
 
+    def set_inference_fixed_weights(self, weights: Optional[List[float]] = None):
+        """Set exact expert mixture probabilities used only for inference."""
+        if weights is None:
+            self.inference_fixed_weights = None
+            return
+        weights = torch.as_tensor(weights, dtype=torch.float64)
+        if weights.ndim != 1 or len(weights) != len(self.models):
+            raise ValueError(
+                f"Expected {len(self.models)} fixed weights, got {weights.tolist()}"
+            )
+        if not torch.isfinite(weights).all() or (weights < 0).any():
+            raise ValueError("Fixed weights must be finite and non-negative")
+        if not torch.isclose(weights.sum(), weights.new_tensor(1.0), atol=1e-6):
+            raise ValueError(f"Fixed weights must sum to 1, got {weights.sum().item()}")
+        self.inference_fixed_weights = tuple(float(x) for x in weights)
+
+    def set_inference_diffusion_seeds(self, seeds: Optional[List[int]] = None):
+        """Set one deterministic diffusion RNG stream per batch element."""
+        if seeds is None:
+            self.inference_diffusion_seeds = None
+            return
+        self.inference_diffusion_seeds = tuple(int(seed) for seed in seeds)
+
 
     def get_noise_prediction_network(self) -> nn.Module:
         return self.models
@@ -203,18 +226,56 @@ class DiffusionUnetsPolicy(DiffusionUnetsBase):
  
         scheduler = self.noise_scheduler
 
-        trajectory = torch.randn(
-            size=(len(global_conds[0]), self.horizon, self.action_dim),
-            dtype=global_conds[0].dtype,
-            device=global_conds[0].device,
-            generator=generator
-        )
+        batch_size = len(global_conds[0])
+        diffusion_seeds = getattr(self, "inference_diffusion_seeds", None)
+        per_sample_generators = None
+        if diffusion_seeds is not None:
+            if generator is not None:
+                raise ValueError(
+                    "Use either generator or inference diffusion seeds, not both"
+                )
+            if len(diffusion_seeds) != batch_size:
+                raise ValueError(
+                    f"Expected {batch_size} diffusion seeds, got {len(diffusion_seeds)}"
+                )
+            per_sample_generators = []
+            initial_samples = []
+            for seed in diffusion_seeds:
+                sample_generator = torch.Generator(device=global_conds[0].device)
+                sample_generator.manual_seed(seed)
+                per_sample_generators.append(sample_generator)
+                initial_samples.append(torch.randn(
+                    size=(self.horizon, self.action_dim),
+                    dtype=global_conds[0].dtype,
+                    device=global_conds[0].device,
+                    generator=sample_generator,
+                ))
+            trajectory = torch.stack(initial_samples, dim=0)
+        else:
+            trajectory = torch.randn(
+                size=(batch_size, self.horizon, self.action_dim),
+                dtype=global_conds[0].dtype,
+                device=global_conds[0].device,
+                generator=generator
+            )
         B = trajectory.shape[0]
 
         # set step values
         scheduler.set_timesteps(self.num_inference_steps)
         for t in scheduler.timesteps:
-            if self.composition_strategy == "soft_gating":
+            fixed_weights = getattr(self, "inference_fixed_weights", None)
+            if fixed_weights is not None:
+                pred = sum(
+                    weights[i][:, None, None]
+                    * model(
+                        trajectory,
+                        t,
+                        global_cond=global_conds[i // self.num_modules]
+                    )
+                    for i, model in enumerate(self.models)
+                    if fixed_weights[i] != 0
+                )
+            elif self.composition_strategy == "soft_gating":
                 norm_weights = F.softmax(weights, dim=0)
                 pred = sum(
                     norm_weights[i][:, None, None] * model(trajectory, t, global_cond=global_conds[i//self.num_modules])
@@ -261,7 +322,21 @@ class DiffusionUnetsPolicy(DiffusionUnetsBase):
             else:
                 raise ValueError(f"Unknown strategy: {self.composition_strategy}")
 
-            trajectory = scheduler.step(pred, t, trajectory, generator=generator, **kwargs).prev_sample                
+            if per_sample_generators is None:
+                trajectory = scheduler.step(
+                    pred, t, trajectory, generator=generator, **kwargs
+                ).prev_sample
+            else:
+                trajectory = torch.cat([
+                    scheduler.step(
+                        pred[b:b+1],
+                        t,
+                        trajectory[b:b+1],
+                        generator=per_sample_generators[b],
+                        **kwargs,
+                    ).prev_sample
+                    for b in range(B)
+                ], dim=0)
                 
                 
         return trajectory
@@ -291,10 +366,29 @@ class DiffusionUnetsPolicy(DiffusionUnetsBase):
         global_cond = torch.cat(list(features.values()), dim=-1)
         # Experts-stage checkpoints have no trained router: use equal weights
         # for the aggregate preview, rather than random router logits.
-        if self.training_stage == "experts":
-            weights = global_cond.new_zeros((len(self.models), B))
+        fixed_weights = getattr(self, "inference_fixed_weights", None)
+        if fixed_weights is not None:
+            applied_weights = global_cond.new_tensor(fixed_weights)[:, None].expand(-1, B)
+            router_logits = None
+            weights = applied_weights
+        elif self.training_stage == "experts":
+            router_logits = global_cond.new_zeros((len(self.models), B))
+            weights = router_logits
         else:
-            weights = self.weight_predictor(global_cond).transpose(0, 1)
+            router_logits = self.weight_predictor(global_cond).transpose(0, 1)
+            weights = router_logits
+
+        if fixed_weights is None:
+            if self.composition_strategy == "soft_gating":
+                applied_weights = F.softmax(router_logits, dim=0)
+            elif self.composition_strategy == "hard_routing":
+                applied_weights = torch.zeros_like(router_logits)
+                applied_weights.scatter_(0, router_logits.argmax(dim=0)[None], 1)
+            elif self.composition_strategy == "topk_moe":
+                k = min(self.topk, len(self.models))
+                topk_values, topk_indices = torch.topk(router_logits, k=k, dim=0)
+                applied_weights = torch.zeros_like(router_logits)
+                applied_weights.scatter_(0, topk_indices, F.softmax(topk_values, dim=0))
 
         # self.log_weights(weights)
         # print(
@@ -324,7 +418,13 @@ class DiffusionUnetsPolicy(DiffusionUnetsBase):
         result = {
             'action': action,
             'action_pred': action_pred,
-            'weights': weights.permute(1, 0),
+            # Backward-compatible alias with the unambiguous meaning of the
+            # probabilities actually used to combine expert predictions.
+            'weights': applied_weights.permute(1, 0),
+            'applied_weights': applied_weights.permute(1, 0),
+            'router_logits': (
+                router_logits.permute(1, 0) if router_logits is not None else None
+            ),
         }
         return result
 

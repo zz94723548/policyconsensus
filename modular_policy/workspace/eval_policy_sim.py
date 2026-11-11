@@ -18,6 +18,7 @@ sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
 
 import os
+import random
 import re
 import pathlib
 import click
@@ -39,6 +40,8 @@ def make_json_safe(obj):
         return {k: make_json_safe(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [make_json_safe(v) for v in obj]
+    elif isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
     elif isinstance(obj, (np.floating, float)):
@@ -57,7 +60,61 @@ def make_json_safe(obj):
 @click.option('-d', '--device', default='cuda:0', help="device to run on")
 @click.option('-u', '--update', is_flag=True, help="weather to update `success_rate` in ckpt file name")
 @click.option('-s', '--dropout_obs', default=(), multiple=True, help="a list of sensor ports to drop i.e. set to 0s")
-def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update, dropout_obs):
+@click.option('--expert', type=click.Choice(['rgb', 'pointcloud']), default=None,
+              help="run only the selected expert (DiffusionUnetsPolicy checkpoints)")
+@click.option('--fixed-weights', default=None, metavar='RGB_WEIGHT,PCD_WEIGHT',
+              help="exact inference mixture probabilities; values must sum to 1")
+@click.option('--test-start-seed', type=int, default=1000, show_default=True,
+              help="first RLBench episode seed")
+@click.option('--diffusion-seed', type=int, default=None,
+              help="base seed for per-episode, per-decision diffusion RNG streams")
+@click.option('--deterministic', is_flag=True,
+              help="enable deterministic random seeds and Torch backends")
+@click.option('--episode-log', type=click.Path(dir_okay=False), default=None,
+              help="write one JSON object per episode")
+@click.option('--decision-log', type=click.Path(dir_okay=False), default=None,
+              help="write one JSON object per policy replanning decision")
+def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
+                    dropout_obs, expert, fixed_weights, test_start_seed,
+                    diffusion_seed, deterministic, episode_log, decision_log):
+    if expert is not None and fixed_weights is not None:
+        raise click.UsageError("--expert and --fixed-weights are mutually exclusive")
+
+    parsed_fixed_weights = None
+    if fixed_weights is not None:
+        try:
+            parsed_fixed_weights = [float(x.strip()) for x in fixed_weights.split(',')]
+        except ValueError as exc:
+            raise click.BadParameter(
+                "use comma-separated numbers, for example 0.75,0.25",
+                param_hint='--fixed-weights',
+            ) from exc
+        if len(parsed_fixed_weights) != 2:
+            raise click.BadParameter(
+                "RGB+PCD evaluation requires exactly two values",
+                param_hint='--fixed-weights',
+            )
+        if (not all(np.isfinite(x) for x in parsed_fixed_weights)
+                or any(x < 0 for x in parsed_fixed_weights)
+                or not np.isclose(sum(parsed_fixed_weights), 1.0, atol=1e-6)):
+            raise click.BadParameter(
+                "weights must be finite, non-negative, and sum to 1",
+                param_hint='--fixed-weights',
+            )
+
+    if deterministic:
+        global_seed = diffusion_seed if diffusion_seed is not None else test_start_seed
+        os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+        random.seed(global_seed)
+        np.random.seed(global_seed % (2**32))
+        torch.manual_seed(global_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(global_seed)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True)
+        print(f"Deterministic evaluation enabled (global seed {global_seed})")
+
     if os.path.exists(output_dir):
         click.confirm(f"Output path {output_dir} already exists! Overwrite?", abort=True)
     pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -153,6 +210,42 @@ def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
         policy.to(device)
         policy.eval()
 
+        if not hasattr(policy, 'set_inference_fixed_weights'):
+            if expert is not None or parsed_fixed_weights is not None:
+                raise click.ClickException(
+                    "This checkpoint policy does not support fixed expert weights"
+                )
+        elif expert is not None:
+            modalities = [m for m in policy.modalities if m != 'robot_state']
+            if expert not in modalities:
+                raise click.ClickException(
+                    f"Expert {expert!r} is unavailable; checkpoint modalities: {modalities}"
+                )
+            if getattr(policy, 'num_modules', 1) != 1:
+                raise click.ClickException(
+                    "--expert currently requires exactly one expert per modality"
+                )
+            expert_index = modalities.index(expert)
+            weights = [0.0] * len(policy.models)
+            weights[expert_index] = 1.0
+            policy.set_inference_fixed_weights(weights)
+            print(f"Forced single-expert inference: {expert} "
+                  f"(model index {expert_index}, applied weights {weights})")
+        elif parsed_fixed_weights is not None:
+            if getattr(policy, 'num_modules', 1) != 1:
+                raise click.ClickException(
+                    "--fixed-weights currently requires one expert per modality"
+                )
+            modalities = [m for m in policy.modalities if m != 'robot_state']
+            if modalities != ['rgb', 'pointcloud']:
+                raise click.ClickException(
+                    f"Expected RGB+PCD modalities, got {modalities}"
+                )
+            policy.set_inference_fixed_weights(parsed_fixed_weights)
+            print("Forced fixed inference mixture: "
+                  f"RGB={parsed_fixed_weights[0]}, "
+                  f"PointCloud={parsed_fixed_weights[1]}")
+
         # === WEIGHT CONSISTENCY CHECK ===
         # This verifies that model weights are loaded correctly and remain constant during evaluation
         try:
@@ -206,6 +299,11 @@ def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
             cfg.task.env_runner,
             output_dir=output_dir,
             obs_to_drop=dropout_obs,
+            test_start_seed=test_start_seed,
+            diffusion_seed_base=diffusion_seed,
+            episode_log_path=episode_log,
+            decision_log_path=decision_log,
+            checkpoint_path=ckpt,
             # n_parallel_envs = 25, 
             n_test=num_exp,
             n_parallel_envs=min(
@@ -230,8 +328,11 @@ def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
         
         json_log = {
             'checkpoint': ckpt,
-            'num_exp': 1,
+            'num_exp': num_exp,
             'dropout_obs': ','.join(dropout_obs),
+            'test_start_seed': test_start_seed,
+            'diffusion_seed': diffusion_seed,
+            'deterministic': deterministic,
         }
         
         for key, value in runner_log.items():

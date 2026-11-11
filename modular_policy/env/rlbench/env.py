@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import random
 import gymnasium
 import hydra
 import gc
@@ -275,6 +276,83 @@ class RlbenchEnv(gymnasium.Env):
         self.done = self.done or terminated or (reward >= 1) \
             or (self.cur_step >= self.max_episode_steps)
         return self._extact_obs(obs), reward, self.done, False, {}
+
+    def get_branch_state(self):
+        """Capture the restorable RLBench state used by branch experiments."""
+        task = self.task_env._task
+        robot = self.task_env._robot
+        objects = task.get_base().get_objects_in_tree(exclude_base=False)
+        object_states = []
+        for obj in objects:
+            linear_velocity, angular_velocity = obj.get_velocity()
+            object_states.append({
+                'handle': obj.get_handle(),
+                'name': obj.get_name(),
+                'pose': np.asarray(obj.get_pose(), dtype=np.float64),
+                'linear_velocity': linear_velocity,
+                'angular_velocity': angular_velocity,
+            })
+        state = {
+            'task_name': self.task_name,
+            'task_state': task.get_state(),
+            'arm_configuration': robot.arm.get_configuration_tree(),
+            'gripper_configuration': robot.gripper.get_configuration_tree(),
+            'object_states': object_states,
+            'cur_step': self.cur_step,
+            'done': self.done,
+            'python_rng_state': random.getstate(),
+            'numpy_rng_state': np.random.get_state(),
+            'torch_rng_state': torch.random.get_rng_state(),
+            'torch_cuda_rng_state': (
+                torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            ),
+        }
+        return state
+
+    def set_branch_state(self, state):
+        """Restore a state captured by :meth:`get_branch_state`.
+
+        Configuration trees restore poses and joint/path values. CoppeliaSim
+        resets dynamic objects while applying them, so velocities and contact
+        solver internals are audited but are not claimed to be exact.
+        """
+        if state['task_name'] != self.task_name:
+            raise ValueError(
+                f"State task {state['task_name']} does not match {self.task_name}"
+            )
+        task = self.task_env._task
+        pyrep = task.pyrep
+        task.restore_state(state['task_state'])
+        pyrep.set_configuration_tree(state['arm_configuration'])
+        pyrep.set_configuration_tree(state['gripper_configuration'])
+        self.cur_step = state['cur_step']
+        self.done = state['done']
+        random.setstate(state['python_rng_state'])
+        np.random.set_state(state['numpy_rng_state'])
+        torch.random.set_rng_state(state['torch_rng_state'])
+        if torch.cuda.is_available() and state['torch_cuda_rng_state'] is not None:
+            torch.cuda.set_rng_state_all(state['torch_cuda_rng_state'])
+        # Applying a configuration tree resets dynamic objects. CoppeliaSim
+        # does not expose joint-force values again until one simulation step
+        # has recomputed the dynamics and sensors. This stabilization step is
+        # intentionally included in the restoration error measured by B3.
+        pyrep.step()
+        return self._extact_obs(self.task_env.get_observation())
+
+    def get_branch_object_state(self):
+        """Return object pose/velocity diagnostics without mutating the sim."""
+        task = self.task_env._task
+        result = []
+        for obj in task.get_base().get_objects_in_tree(exclude_base=False):
+            linear_velocity, angular_velocity = obj.get_velocity()
+            result.append({
+                'handle': obj.get_handle(),
+                'name': obj.get_name(),
+                'pose': np.asarray(obj.get_pose(), dtype=np.float64),
+                'linear_velocity': linear_velocity,
+                'angular_velocity': angular_velocity,
+            })
+        return result
 
 
     def close(self) -> None:
