@@ -1,0 +1,10 @@
+defaults:
+  - train_frozen_router
+  - _self_
+
+router_data: expert_train
+cache_dir: output/paired_errors/router_expert_data_seed2026
+
+hydra:
+  run:
+    dir: output/routers/native_mmpc_expert_data_seed42

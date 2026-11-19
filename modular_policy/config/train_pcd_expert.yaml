@@ -1,0 +1,13 @@
+defaults:
+  - expert_training
+  - _self_
+
+expert_modality: pcd
+expert_obs_keys: [fused_pointcloud, joint_positions, gripper_joint_positions]
+
+policy:
+  obs_encoders:
+    - _target_: modular_policy.model.perception.model_factory.create_pointcloud_encoder
+      _recursive_: false
+      to_use: Dp3PointcloudEncoder
+      model_library: ${pointcloud_encoder}

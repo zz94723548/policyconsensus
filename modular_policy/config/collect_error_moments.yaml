@@ -1,0 +1,25 @@
+defaults:
+  - _self_
+
+_target_: modular_policy.workspace.collect_error_moments.CollectErrorMomentsWorkspace
+rgb_checkpoint: output/experts/rgb_seed42/checkpoints/latest.ckpt
+pcd_checkpoint: output/experts/pcd_seed42/checkpoints/latest.ckpt
+source_manifest: splits/mt4_seed42.json
+risk_split: splits/mt4_risk_model_seed142.json
+partition: risk_train
+zarr_path: null
+cache_dir: output/paired_errors/latest_seed2026
+device: cuda:0
+batch_size: 16
+context_stride: 8
+train_noise_repeats: 4
+val_noise_repeats: 8
+seed: 2026
+save_errors: true
+resume: false
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${cache_dir}

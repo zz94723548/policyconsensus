@@ -33,14 +33,6 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 class TrainPolicyWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
-    def configure_normalizer(self, normalizer):
-        self.model.set_normalizer(normalizer)
-        if self.ema_model is not None:
-            self.ema_model.set_normalizer(normalizer)
-
-    def configure_training_mode(self):
-        pass
-
     def __init__(self, cfg: OmegaConf, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
 
@@ -95,7 +87,9 @@ class TrainPolicyWorkspace(BaseWorkspace):
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
-        self.configure_normalizer(normalizer)
+        self.model.set_normalizer(normalizer)
+        if cfg.training.use_ema:
+            self.ema_model.set_normalizer(normalizer)
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(
@@ -173,7 +167,6 @@ class TrainPolicyWorkspace(BaseWorkspace):
             while self.epoch < cfg.training.num_epochs:
                 step_log = dict()
                 # ========= train for this epoch ==========
-                self.configure_training_mode()
                 if cfg.training.freeze_encoder:
                     self.model.obs_encoder.eval()
                     self.model.obs_encoder.requires_grad_(False)
@@ -212,11 +205,6 @@ class TrainPolicyWorkspace(BaseWorkspace):
                             'epoch': self.epoch,
                             'lr': lr_scheduler.get_last_lr()[0]
                         }
-                        if getattr(self.model, 'training_stage', None) == 'experts':
-                            step_log.update({
-                                f'train_loss/{name}': value.item()
-                                for name, value in self.model.last_expert_losses.items()
-                            })
 
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch:

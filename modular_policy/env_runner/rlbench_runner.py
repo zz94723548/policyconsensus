@@ -1,6 +1,4 @@
 import os
-import hashlib
-import json
 import warnings
 import wandb
 import numpy as np
@@ -21,33 +19,9 @@ from modular_policy.env.rlbench.factory import get_subtasks
 from modular_policy.env_runner.base_runner import BaseRunner, obs_dropout
 from modular_policy.policy.base_policy import BasePolicy
 from modular_policy.common.pytorch_util import dict_apply
-from modular_policy.common.video_weight_overlay import annotate_policy_weights
+from modular_policy.common.evaluation_reproducibility import observation_snapshot
 
 from typing import Optional, List
-
-
-def stable_diffusion_seed(base_seed, task_name, environment_seed, decision_index):
-    """Return a process- and batch-order-independent Torch RNG seed."""
-    identity = f"{base_seed}|{task_name}|{environment_seed}|{decision_index}"
-    digest = hashlib.blake2b(identity.encode('utf-8'), digest_size=8).digest()
-    return int.from_bytes(digest, byteorder='little') % (2**63 - 1)
-
-
-def write_jsonl(path, rows):
-    if path is None:
-        return
-    path = pathlib.Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('w', encoding='utf-8') as stream:
-        for row in rows:
-            stream.write(json.dumps(row, sort_keys=True) + '\n')
-
-
-def policy_method_name(policy):
-    fixed_weights = getattr(policy, 'inference_fixed_weights', None)
-    if fixed_weights is not None:
-        return 'fixed_' + '_'.join(f'{weight:g}' for weight in fixed_weights)
-    return getattr(policy, 'training_stage', 'policy')
 
 
 
@@ -58,20 +32,6 @@ def merge_obs_dicts(obs_dicts):
         key: np.stack([obs_dict[key] for obs_dict in obs_dicts])
         for key in obs_dicts[0].keys()
     }
-
-
-def get_policy_weight_labels(policy: BasePolicy) -> List[str]:
-    modality_names = {
-        'rgb': 'RGB',
-        'pointcloud': 'PointCloud',
-        'dino_pointcloud': 'DINO',
-    }
-    return [
-        f"{modality_names.get(modality, modality)} E{expert_idx + 1}"
-        for modality in getattr(policy, 'modalities', [])
-        if modality != 'robot_state'
-        for expert_idx in range(getattr(policy, 'num_modules', 1))
-    ]
 
 
 class RlbenchParallelRunner(BaseRunner):
@@ -118,10 +78,6 @@ class RlbenchParallelRunner(BaseRunner):
         action_mode: Optional[ActionMode] = None,
         obs_to_drop: List[str] = [],
         zarr_path: Optional[str] = None,
-        diffusion_seed_base: Optional[int] = None,
-        episode_log_path: Optional[str] = None,
-        decision_log_path: Optional[str] = None,
-        checkpoint_path: Optional[str] = None,
     ):
         super().__init__(output_dir)
 
@@ -152,7 +108,7 @@ class RlbenchParallelRunner(BaseRunner):
                             RlbenchEnv(
                                 task_name=task_name,
                                 image_size=image_size,
-                                num_points=num_points,
+                                num_points=512, # num_points,
                                 enable_depth=enable_depth,
                                 enable_dino=enable_dino,
                                 process_dino=True,
@@ -197,6 +153,7 @@ class RlbenchParallelRunner(BaseRunner):
                     filename.parent.mkdir(parents=True, exist_ok=True)
                     filename = str(filename)
                     env.env.file_path = filename
+                env.reset(seed=seed)
             env_init_fn_dills.append(dill.dumps(init_fn))
 
         assert len(env_fns) == n_parallel_envs
@@ -216,10 +173,6 @@ class RlbenchParallelRunner(BaseRunner):
         self.max_episode_steps = max_episode_steps
         self.tqdm_interval_sec = tqdm_interval_sec
         self.obs_to_drop = obs_to_drop
-        self.diffusion_seed_base = diffusion_seed_base
-        self.episode_log_path = episode_log_path
-        self.decision_log_path = decision_log_path
-        self.checkpoint_path = checkpoint_path
 
 
     @torch.inference_mode()
@@ -227,9 +180,6 @@ class RlbenchParallelRunner(BaseRunner):
         device = policy.device
         dtype = policy.dtype
         policy_name = policy.get_policy_name()
-        if (self.diffusion_seed_base is None
-                and hasattr(policy, 'set_inference_diffusion_seeds')):
-            policy.set_inference_diffusion_seeds(None)
 
         # plan for rollout
         n_envs = len(self.env_fns)
@@ -240,9 +190,7 @@ class RlbenchParallelRunner(BaseRunner):
         all_video_paths = [None] * n_inits
         all_success = [False] * n_inits
         all_avg_weights = [None] * n_inits
-        all_episode_steps = [0] * n_inits
-        all_num_replans = [0] * n_inits
-        decision_rows = []
+        all_initial_observations = [None] * n_inits
 
         for chunk_idx in range(n_chunks):
             start = chunk_idx * n_envs
@@ -264,10 +212,10 @@ class RlbenchParallelRunner(BaseRunner):
             )
 
             # start rollout
-            reset_seeds = self.env_seeds[start:end]
-            if n_diff > 0:
-                reset_seeds.extend([self.env_seeds[0]] * n_diff)
+            reset_seeds = self.env_seeds[start:end] + [self.env_seeds[0]] * n_diff
             obs, _ = self.env.reset(seed=reset_seeds)
+            for lane in range(this_n_active_envs):
+                all_initial_observations[start + lane] = observation_snapshot(obs, lane)
             policy.reset()
             chunk_episode_weights = [[] for _ in range(this_n_active_envs)]
 
@@ -279,7 +227,6 @@ class RlbenchParallelRunner(BaseRunner):
             )
 
             done = False
-            decision_index = 0
             while not done and pbar.n < pbar.total:
                 # create obs dict
                 obs_dict = dict_apply(
@@ -288,34 +235,6 @@ class RlbenchParallelRunner(BaseRunner):
                 )
                 obs_dict = obs_dropout(obs_dict, self.obs_to_drop)
 
-                diffusion_seeds = None
-                if self.diffusion_seed_base is not None:
-                    diffusion_seeds = [
-                        stable_diffusion_seed(
-                            self.diffusion_seed_base,
-                            self.env_task_names[start + env_i],
-                            self.env_seeds[start + env_i],
-                            decision_index,
-                        )
-                        for env_i in range(this_n_active_envs)
-                    ]
-                    # Padded vector slots do not contribute results, but still
-                    # need a seed so the policy batch size matches.
-                    diffusion_seeds.extend(
-                        stable_diffusion_seed(
-                            self.diffusion_seed_base,
-                            self.env_task_names[start],
-                            self.env_seeds[start],
-                            decision_index,
-                        )
-                        for _ in range(n_envs - this_n_active_envs)
-                    )
-                    if not hasattr(policy, 'set_inference_diffusion_seeds'):
-                        raise RuntimeError(
-                            "Policy does not support deterministic diffusion seeds"
-                        )
-                    policy.set_inference_diffusion_seeds(diffusion_seeds)
-
                 # run policy
                 with torch.inference_mode():
                     policy_output = policy.predict_action({
@@ -323,37 +242,11 @@ class RlbenchParallelRunner(BaseRunner):
                         for port in policy.get_observation_ports()
                     })
                     action = policy_output['action'].detach().cpu().numpy()
-                    applied_weights = policy_output.get(
-                        'applied_weights', policy_output.get('weights', None)
-                    )
-                    if applied_weights is not None:
-                        applied_weights = applied_weights.detach().cpu()
+                    raw_weights = policy_output.get('weights', None)
+                    if raw_weights is not None:
+                        raw_weights = raw_weights.detach().cpu()
                         for env_i in range(this_n_active_envs):
-                            chunk_episode_weights[env_i].append(applied_weights[env_i])
-
-                    router_logits = policy_output.get('router_logits', None)
-                    if router_logits is not None:
-                        router_logits = router_logits.detach().cpu()
-                    if self.decision_log_path is not None:
-                        for env_i in range(this_n_active_envs):
-                            global_i = start + env_i
-                            decision_rows.append({
-                                'task': self.env_task_names[global_i],
-                                'environment_seed': self.env_seeds[global_i],
-                                'decision_index': decision_index,
-                                'decision_diffusion_seed': (
-                                    diffusion_seeds[env_i]
-                                    if diffusion_seeds is not None else None
-                                ),
-                                'router_logits': (
-                                    router_logits[env_i].tolist()
-                                    if router_logits is not None else None
-                                ),
-                                'applied_weights': (
-                                    applied_weights[env_i].tolist()
-                                    if applied_weights is not None else None
-                                ),
-                            })
+                            chunk_episode_weights[env_i].append(raw_weights[env_i])
 
                 if not np.all(np.isfinite(action)):
                     raise RuntimeError("NaN of Inf action")
@@ -373,11 +266,6 @@ class RlbenchParallelRunner(BaseRunner):
 
                 # update pbar
                 pbar.update(action.shape[1])
-                for env_i in range(this_n_active_envs):
-                    global_i = start + env_i
-                    all_episode_steps[global_i] += action.shape[1]
-                    all_num_replans[global_i] += 1
-                decision_index += 1
             pbar.close()
             
             # Compute average weights per env in this chunk
@@ -391,20 +279,7 @@ class RlbenchParallelRunner(BaseRunner):
             all_avg_weights[this_global_slice] = avg_weights
 
             # collect data for this round
-            video_paths = self.env.render()[this_local_slice]
-            annotated_video_paths = []
-            weight_labels = get_policy_weight_labels(policy)
-            for env_i, video_path in enumerate(video_paths):
-                weights_history = chunk_episode_weights[env_i]
-                if video_path is not None and weights_history:
-                    video_path = annotate_policy_weights(
-                        video_path=video_path,
-                        decision_weights=weights_history,
-                        labels=weight_labels,
-                        frames_per_decision=self.n_action_steps,
-                    )
-                annotated_video_paths.append(video_path)
-            all_video_paths[this_global_slice] = annotated_video_paths
+            all_video_paths[this_global_slice] = self.env.render()[this_local_slice]
 
         # clear out video buffer
         _ = self.env.reset()
@@ -412,26 +287,6 @@ class RlbenchParallelRunner(BaseRunner):
 
         # log
         log_data = dict()
-
-        episode_rows = []
-        method = policy_method_name(policy)
-        for i in range(n_inits):
-            episode_rows.append({
-                'method': method,
-                'checkpoint': self.checkpoint_path,
-                'task': self.env_task_names[i],
-                'environment_seed': self.env_seeds[i],
-                'diffusion_seed_base': self.diffusion_seed_base,
-                'success': bool(all_success[i]),
-                'episode_steps': all_episode_steps[i],
-                'num_replans': all_num_replans[i],
-                'mean_applied_weights': (
-                    all_avg_weights[i].tolist()
-                    if all_avg_weights[i] is not None else None
-                ),
-            })
-        write_jsonl(self.episode_log_path, episode_rows)
-        write_jsonl(self.decision_log_path, decision_rows)
 
         for task_name in set(self.env_task_names):
             task_indices = [i for i, name in enumerate(self.env_task_names) if name == task_name]
@@ -444,9 +299,15 @@ class RlbenchParallelRunner(BaseRunner):
             if task_weights:
                 mean_weight = np.mean(np.stack(task_weights, axis=0), axis=0)  # shape: [n_components]
                 log_data.update({
-                    f"{task_name}/avg_applied_weight_{j}": w
+                    f"{task_name}/avg_raw_weight_{j}": w
                     for j, w in enumerate(mean_weight)
                 })
+                if not getattr(policy, 'weights_are_probabilities', False):
+                    softmaxed = np.exp(mean_weight) / np.exp(mean_weight).sum()
+                    log_data.update({
+                        f"{task_name}/avg_softmax_weight_{j}": w
+                        for j, w in enumerate(softmaxed)
+                    })
 
         for i in range(n_inits):
             seed = self.env_seeds[i]
@@ -460,6 +321,12 @@ class RlbenchParallelRunner(BaseRunner):
             
         # log aggregate metrics
         log_data['mean_success_rate'] = np.mean(all_success)
+        log_data['episode_results'] = {
+            str(seed): {'task': task, 'seed': int(seed), 'success': bool(success),
+                        'initial_observation': initial}
+            for seed, task, success, initial in zip(
+                self.env_seeds, self.env_task_names, all_success, all_initial_observations)
+        }
         
         return log_data
     
@@ -499,10 +366,6 @@ class RlbenchNonParallelRunner(BaseRunner):
         action_mode: Optional[ActionMode] = None,
         obs_to_drop: List[str] = [],
         zarr_path: Optional[str] = None,
-        diffusion_seed_base: Optional[int] = None,
-        episode_log_path: Optional[str] = None,
-        decision_log_path: Optional[str] = None,
-        checkpoint_path: Optional[str] = None,
     ):
         super().__init__(output_dir)
 
@@ -540,6 +403,7 @@ class RlbenchNonParallelRunner(BaseRunner):
                     filename.parent.mkdir(parents=True, exist_ok=True)
                     filename = str(filename)
                     env.env.file_path = filename
+                env.reset(seed=seed)
             env_init_fn_dills.append(dill.dumps(init_fn))
 
         env = MultiStepWrapper(
@@ -589,10 +453,6 @@ class RlbenchNonParallelRunner(BaseRunner):
         self.max_episode_steps = max_episode_steps
         self.tqdm_interval_sec = tqdm_interval_sec
         self.obs_to_drop = obs_to_drop
-        self.diffusion_seed_base = diffusion_seed_base
-        self.episode_log_path = episode_log_path
-        self.decision_log_path = decision_log_path
-        self.checkpoint_path = checkpoint_path
 
     
     @torch.inference_mode()
@@ -600,9 +460,6 @@ class RlbenchNonParallelRunner(BaseRunner):
         device = policy.device
         dtype = policy.dtype
         policy_name = policy.get_policy_name()
-        if (self.diffusion_seed_base is None
-                and hasattr(policy, 'set_inference_diffusion_seeds')):
-            policy.set_inference_diffusion_seeds(None)
 
         # plan for rollout
         n_inits = len(self.env_init_fn_dills)
@@ -610,19 +467,15 @@ class RlbenchNonParallelRunner(BaseRunner):
         # allocate data
         all_video_paths = [None] * n_inits
         all_success = [False] * n_inits
-        all_avg_weights = [None] * n_inits
-        all_episode_steps = [0] * n_inits
-        all_num_replans = [0] * n_inits
-        decision_rows = []
 
         for test_i in range(n_inits):
             init_fn = dill.loads(self.env_init_fn_dills[test_i])
             init_fn(self.env)
 
             # start rollout
-            obs, _ = self.env.reset(seed=self.env_seeds[test_i])
+            # obs, _ = self.env.reset(seed=42)    # NOTE: seeding happens here, init_fn has bug
+            obs, _ = self.env.reset()
             policy.reset()
-            episode_weights = []
 
             pbar = tqdm.tqdm(
                 total=self.max_episode_steps,
@@ -632,7 +485,6 @@ class RlbenchNonParallelRunner(BaseRunner):
             )
 
             done = False
-            decision_index = 0
             while not done and pbar.n < pbar.total:
                 # create obs dict
                 obs_dict = dict_apply(
@@ -641,49 +493,12 @@ class RlbenchNonParallelRunner(BaseRunner):
                 )
                 obs_dict = obs_dropout(obs_dict, self.obs_to_drop)
 
-                diffusion_seed = None
-                if self.diffusion_seed_base is not None:
-                    diffusion_seed = stable_diffusion_seed(
-                        self.diffusion_seed_base,
-                        self.env_task_names[test_i],
-                        self.env_seeds[test_i],
-                        decision_index,
-                    )
-                    if not hasattr(policy, 'set_inference_diffusion_seeds'):
-                        raise RuntimeError(
-                            "Policy does not support deterministic diffusion seeds"
-                        )
-                    policy.set_inference_diffusion_seeds([diffusion_seed])
-
                 # run policy
                 with torch.inference_mode():
-                    policy_output = policy.predict_action({
+                    action = policy.predict_action({
                         port: obs_dict[port] 
                         for port in policy.get_observation_ports()
-                    })
-                    action = policy_output['action'].detach().cpu().numpy().squeeze(0)
-                    applied_weights = policy_output.get(
-                        'applied_weights', policy_output.get('weights', None)
-                    )
-                    if applied_weights is not None:
-                        episode_weights.append(applied_weights[0].detach().cpu())
-
-                    router_logits = policy_output.get('router_logits', None)
-                    if self.decision_log_path is not None:
-                        decision_rows.append({
-                            'task': self.env_task_names[test_i],
-                            'environment_seed': self.env_seeds[test_i],
-                            'decision_index': decision_index,
-                            'decision_diffusion_seed': diffusion_seed,
-                            'router_logits': (
-                                router_logits[0].detach().cpu().tolist()
-                                if router_logits is not None else None
-                            ),
-                            'applied_weights': (
-                                applied_weights[0].detach().cpu().tolist()
-                                if applied_weights is not None else None
-                            ),
-                        })
+                    })['action'].detach().cpu().numpy().squeeze(0)
 
                 # step env
                 obs, reward, done, _, _ = self.env.step(action)
@@ -692,52 +507,16 @@ class RlbenchNonParallelRunner(BaseRunner):
 
                 # update pbar
                 pbar.update(action.shape[0])
-                all_episode_steps[test_i] += action.shape[0]
-                all_num_replans[test_i] += 1
-                decision_index += 1
             pbar.close()
 
-            if episode_weights:
-                all_avg_weights[test_i] = np.mean(
-                    np.stack(episode_weights, axis=0), axis=0
-                )
-
             # collect data for this round
-            video_path = self.env.render()
-            if video_path is not None and episode_weights:
-                video_path = annotate_policy_weights(
-                    video_path=video_path,
-                    decision_weights=episode_weights,
-                    labels=get_policy_weight_labels(policy),
-                    frames_per_decision=self.n_action_steps,
-                )
-            all_video_paths[test_i] = video_path
+            all_video_paths[test_i] = self.env.render()
 
         # clear out video buffer
         _ = self.env.reset()
 
         # log 
         log_data = dict()
-
-        episode_rows = []
-        method = policy_method_name(policy)
-        for i in range(n_inits):
-            episode_rows.append({
-                'method': method,
-                'checkpoint': self.checkpoint_path,
-                'task': self.env_task_names[i],
-                'environment_seed': self.env_seeds[i],
-                'diffusion_seed_base': self.diffusion_seed_base,
-                'success': bool(all_success[i]),
-                'episode_steps': all_episode_steps[i],
-                'num_replans': all_num_replans[i],
-                'mean_applied_weights': (
-                    all_avg_weights[i].tolist()
-                    if all_avg_weights[i] is not None else None
-                ),
-            })
-        write_jsonl(self.episode_log_path, episode_rows)
-        write_jsonl(self.decision_log_path, decision_rows)
 
         for task_name in set(self.env_task_names):
             task_success = [

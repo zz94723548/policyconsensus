@@ -1,0 +1,21 @@
+defaults:
+  - _self_
+
+_target_: modular_policy.workspace.calibrate_error_moments.CalibrateErrorMomentsWorkspace
+model_run_dir: output/error_moments/shared_history4_seed42
+checkpoint: ${model_run_dir}/checkpoints/best_risk.ckpt
+training_cache_metadata: ${model_run_dir}/cache_metadata.json
+training_audit: ${model_run_dir}/training_audit.json
+training_baselines: ${model_run_dir}/baselines.json
+calibration_cache_dir: output/paired_errors/calibration_latest_seed2026
+# Four calibration episodes per task give a finite 80% episode quantile.
+# 90% would require an infinite radius under this per-task construction.
+alpha: 0.2
+batch_size: 64
+device: cuda:0
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: output/error_moments/calibration_shared_history4_seed42

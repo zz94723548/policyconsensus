@@ -1,0 +1,7 @@
+defaults:
+  - collect_error_moments
+  - _self_
+
+partition: risk_calibration
+calibration_noise_repeats: 8
+cache_dir: output/paired_errors/calibration_latest_seed2026

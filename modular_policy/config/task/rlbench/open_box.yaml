@@ -28,7 +28,7 @@ env_runner:
   _target_: modular_policy.env_runner.rlbench_runner.RlbenchRunner
   task_name: open_box
   n_test: 20
-  n_test_vis: 20
+  n_test_vis: 5
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   fps: 10

@@ -18,7 +18,6 @@ sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
 
 import os
-import random
 import re
 import pathlib
 import click
@@ -40,8 +39,6 @@ def make_json_safe(obj):
         return {k: make_json_safe(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [make_json_safe(v) for v in obj]
-    elif isinstance(obj, (np.bool_, bool)):
-        return bool(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
     elif isinstance(obj, (np.floating, float)):
@@ -55,66 +52,34 @@ def make_json_safe(obj):
 @click.option('-c', '--checkpoint', required=True, help="either a .ckpt file or a directory containing .ckpt files")
 @click.option('-o', '--output_dir', required=True, help="output directory for eval info dump")
 @click.option('-n', '--num_exp', default=3, help="num experiments to run")
-@click.option('--num-videos', type=click.IntRange(min=0), default=None,
-              help="number of episodes to record videos for (defaults to checkpoint config)")
 @click.option('-d', '--device', default='cuda:0', help="device to run on")
 @click.option('-u', '--update', is_flag=True, help="weather to update `success_rate` in ckpt file name")
 @click.option('-s', '--dropout_obs', default=(), multiple=True, help="a list of sensor ports to drop i.e. set to 0s")
-@click.option('--expert', type=click.Choice(['rgb', 'pointcloud']), default=None,
-              help="run only the selected expert (DiffusionUnetsPolicy checkpoints)")
-@click.option('--fixed-weights', default=None, metavar='RGB_WEIGHT,PCD_WEIGHT',
-              help="exact inference mixture probabilities; values must sum to 1")
-@click.option('--test-start-seed', type=int, default=1000, show_default=True,
-              help="first RLBench episode seed")
-@click.option('--diffusion-seed', type=int, default=None,
-              help="base seed for per-episode, per-decision diffusion RNG streams")
-@click.option('--deterministic', is_flag=True,
-              help="enable deterministic random seeds and Torch backends")
-@click.option('--episode-log', type=click.Path(dir_okay=False), default=None,
-              help="write one JSON object per episode")
-@click.option('--decision-log', type=click.Path(dir_okay=False), default=None,
-              help="write one JSON object per policy replanning decision")
-def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
-                    dropout_obs, expert, fixed_weights, test_start_seed,
-                    diffusion_seed, deterministic, episode_log, decision_log):
-    if expert is not None and fixed_weights is not None:
-        raise click.UsageError("--expert and --fixed-weights are mutually exclusive")
-
-    parsed_fixed_weights = None
-    if fixed_weights is not None:
-        try:
-            parsed_fixed_weights = [float(x.strip()) for x in fixed_weights.split(',')]
-        except ValueError as exc:
-            raise click.BadParameter(
-                "use comma-separated numbers, for example 0.75,0.25",
-                param_hint='--fixed-weights',
-            ) from exc
-        if len(parsed_fixed_weights) != 2:
-            raise click.BadParameter(
-                "RGB+PCD evaluation requires exactly two values",
-                param_hint='--fixed-weights',
-            )
-        if (not all(np.isfinite(x) for x in parsed_fixed_weights)
-                or any(x < 0 for x in parsed_fixed_weights)
-                or not np.isclose(sum(parsed_fixed_weights), 1.0, atol=1e-6)):
-            raise click.BadParameter(
-                "weights must be finite, non-negative, and sum to 1",
-                param_hint='--fixed-weights',
-            )
-
-    if deterministic:
-        global_seed = diffusion_seed if diffusion_seed is not None else test_start_seed
-        os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
-        random.seed(global_seed)
-        np.random.seed(global_seed % (2**32))
-        torch.manual_seed(global_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(global_seed)
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cudnn.deterministic = True
-        torch.use_deterministic_algorithms(True)
-        print(f"Deterministic evaluation enabled (global seed {global_seed})")
-
+@click.option('--fusion', type=click.Choice(['rgb', 'pcd', 'equal', 'fixed', 'point', 'robust', 'router']), default=None,
+              help='Matched MT4 expert/fusion comparison using the same sampler and environment settings.')
+@click.option('--pcd-checkpoint', type=click.Path(exists=True, dir_okay=False), default=None)
+@click.option('--calibration', type=click.Path(exists=True, dir_okay=False), default=None)
+@click.option('--statistics-checkpoint', type=click.Path(exists=True, dir_okay=False), default=None,
+              help='A/shared or B/per-step statistics checkpoint for --fusion point; omit --calibration.')
+@click.option('--router-checkpoint', type=click.Path(exists=True, dir_okay=False), default=None,
+              help='Frozen-expert native MMPC router checkpoint for --fusion router.')
+@click.option('--eval-seed', type=click.IntRange(min=0), default=42, show_default=True)
+@click.option('--test-start-seed', type=click.IntRange(min=0), default=1000, show_default=True)
+@click.option('--rgb-weight', type=click.FloatRange(min=0, max=1), default=None,
+              help='Constant RGB weight for --fusion fixed; PCD weight is 1 minus this value.')
+def eval_policy_sim(checkpoint, output_dir, num_exp, device, update, dropout_obs,
+                    fusion, pcd_checkpoint, calibration, eval_seed, test_start_seed, rgb_weight, statistics_checkpoint, router_checkpoint):
+    if (fusion == 'fixed') != (rgb_weight is not None):
+        raise click.UsageError('--fusion fixed requires --rgb-weight; other modes must omit --rgb-weight.')
+    if statistics_checkpoint and (fusion != 'point' or calibration):
+        raise click.UsageError('Direct statistics loading requires --fusion point; omit --calibration.')
+    if (fusion == 'router') != (router_checkpoint is not None) or router_checkpoint and (calibration or statistics_checkpoint):
+        raise click.UsageError('Use --fusion router with --router-checkpoint only; omit calibration/statistics options.')
+    if fusion and (os.path.isdir(checkpoint) or not pcd_checkpoint or
+                   not (calibration or statistics_checkpoint or router_checkpoint) or update or dropout_obs):
+        raise click.UsageError('Fusion requires one RGB checkpoint, --pcd-checkpoint and calibration or B statistics; omit -u/-s.')
+    if fusion and (num_exp < 4 or num_exp % 4):
+        raise click.UsageError('MT4 fusion evaluation requires a positive multiple of four episodes.')
     if os.path.exists(output_dir):
         click.confirm(f"Output path {output_dir} already exists! Overwrite?", abort=True)
     pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -149,26 +114,68 @@ def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
             output_dir = base_output_dir
         
         # load checkpoint
-        payload = torch.load(open(ckpt, 'rb'), pickle_module=dill)
+        payload = torch.load(ckpt, map_location='cpu', pickle_module=dill)
         cfg = payload['cfg']
+
+        # Split-only expert checkpoints predate an embedded runner configuration.
+        # Reuse the released MT4 runner; keep the original evaluation procedure.
+        if ('env_runner' not in cfg.task and cfg._target_ ==
+                'modular_policy.workspace.train_modality_expert.TrainModalityExpertWorkspace'):
+            task_cfg = omegaconf.OmegaConf.load(
+                pathlib.Path(__file__).resolve().parents[1] / 'config/task/rlbench/mt4.yaml'
+            )
+            # Hydra checkpoints retain struct mode: explicitly allow this new key.
+            with omegaconf.open_dict(cfg.task):
+                cfg.task.env_runner = task_cfg.env_runner
+            cfg.task.env_runner.enable_dino = False
+            cfg.task.env_runner.image_scale = cfg.task.dataset.image_scale
         
         # Fix configuration issue: num_points must be None if enable_depth is False
         if hasattr(cfg.task.env_runner, 'num_points') and hasattr(cfg.task.env_runner, 'enable_depth'):
             if not cfg.task.env_runner.enable_depth and cfg.task.env_runner.num_points is not None:
                 cfg.task.env_runner.num_points = None
         
-        cls = hydra.utils.get_class(cfg._target_)
-        workspace: BaseWorkspace = cls(cfg, output_dir=output_dir)
-        workspace.load_payload(payload, exclude_keys=None, include_keys=None)
-        
-        # get policy from workspace
-        policy: BasePolicy = workspace.model
-        try:
-            if cfg.training.use_ema:
-                policy = workspace.ema_model
-        except omegaconf.errors.ConfigAttributeError:
-            # compositional policy does not have ema_model
-            pass
+        fusion_provenance = None
+        if fusion:
+            del payload
+            import random
+            random.seed(eval_seed)
+            np.random.seed(eval_seed)
+            torch.manual_seed(eval_seed)
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
+            from modular_policy.policy.error_moment_fusion import load_fusion_policy, load_step_fusion_policy, load_native_router_policy
+            if router_checkpoint:
+                policy, fusion_provenance = load_native_router_policy(
+                    ckpt, pcd_checkpoint, router_checkpoint, eval_seed, torch.device(device))
+            elif statistics_checkpoint:
+                policy, fusion_provenance = load_step_fusion_policy(
+                    ckpt, pcd_checkpoint, statistics_checkpoint, eval_seed, torch.device(device))
+            else:
+                policy, fusion_provenance = load_fusion_policy(
+                    ckpt, pcd_checkpoint, fusion, calibration, eval_seed, torch.device(device),
+                    fixed_rgb_weight=rgb_weight)
+            # The RGB checkpoint's native runner already observes RGB and pointcloud.
+            cfg.task.env_runner.enable_depth = True
+            cfg.task.env_runner.num_points = 512
+            cfg.task.env_runner.enable_dino = False
+            cfg.task.env_runner.n_parallel_envs = 8
+            cfg.task.env_runner.n_test_vis = 8
+            fusion_provenance['test_start_seed'] = test_start_seed
+            fusion_provenance['n_parallel_envs'] = 8
+            fusion_provenance['n_test'] = num_exp
+        else:
+            cls = hydra.utils.get_class(cfg._target_)
+            workspace: BaseWorkspace = cls(cfg, output_dir=output_dir)
+            workspace.load_payload(
+                payload, exclude_keys=['optimizer', 'lr_scheduler'], include_keys=[]
+            )
+            policy: BasePolicy = workspace.model
+            try:
+                if cfg.training.use_ema:
+                    policy = workspace.ema_model
+            except omegaconf.errors.ConfigAttributeError:
+                pass
         
         # Fix crop randomizers for deterministic evaluation (eval_fixed_crop behavior)
         try:
@@ -210,42 +217,6 @@ def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
         policy.to(device)
         policy.eval()
 
-        if not hasattr(policy, 'set_inference_fixed_weights'):
-            if expert is not None or parsed_fixed_weights is not None:
-                raise click.ClickException(
-                    "This checkpoint policy does not support fixed expert weights"
-                )
-        elif expert is not None:
-            modalities = [m for m in policy.modalities if m != 'robot_state']
-            if expert not in modalities:
-                raise click.ClickException(
-                    f"Expert {expert!r} is unavailable; checkpoint modalities: {modalities}"
-                )
-            if getattr(policy, 'num_modules', 1) != 1:
-                raise click.ClickException(
-                    "--expert currently requires exactly one expert per modality"
-                )
-            expert_index = modalities.index(expert)
-            weights = [0.0] * len(policy.models)
-            weights[expert_index] = 1.0
-            policy.set_inference_fixed_weights(weights)
-            print(f"Forced single-expert inference: {expert} "
-                  f"(model index {expert_index}, applied weights {weights})")
-        elif parsed_fixed_weights is not None:
-            if getattr(policy, 'num_modules', 1) != 1:
-                raise click.ClickException(
-                    "--fixed-weights currently requires one expert per modality"
-                )
-            modalities = [m for m in policy.modalities if m != 'robot_state']
-            if modalities != ['rgb', 'pointcloud']:
-                raise click.ClickException(
-                    f"Expected RGB+PCD modalities, got {modalities}"
-                )
-            policy.set_inference_fixed_weights(parsed_fixed_weights)
-            print("Forced fixed inference mixture: "
-                  f"RGB={parsed_fixed_weights[0]}, "
-                  f"PointCloud={parsed_fixed_weights[1]}")
-
         # === WEIGHT CONSISTENCY CHECK ===
         # This verifies that model weights are loaded correctly and remain constant during evaluation
         try:
@@ -255,7 +226,7 @@ def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
             param_names = []
             
             for name, param in policy.named_parameters():
-                if param.requires_grad:  # Only check trainable parameters
+                if param.numel():  # Frozen evaluation models still need a real checksum.
                     param_sum = param.sum().item()
                     param_count = param.numel()
                     param_sums.append(param_sum)
@@ -270,7 +241,7 @@ def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
             # Print weight consistency check
             print("=" * 60)
             print("[WEIGHT CONSISTENCY CHECK]")
-            print(f"Total trainable parameters: {total_param_count:,}")
+            print(f"Total model parameters: {total_param_count:,}")
             print(f"Sum of all weights: {total_param_sum:.10f}")
             print(f"Mean weight value: {mean_param_value:.10f}")
             
@@ -295,30 +266,24 @@ def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
         
         # run eval
         print(f"Running evaluation on {ckpt}")
+        # OpenCV may set its own Qt plugin directory during import.
+        if os.environ.get('COPPELIASIM_ROOT'):
+            os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.environ['COPPELIASIM_ROOT']
         env_runner: BaseRunner = hydra.utils.instantiate(
             cfg.task.env_runner,
             output_dir=output_dir,
             obs_to_drop=dropout_obs,
-            test_start_seed=test_start_seed,
-            diffusion_seed_base=diffusion_seed,
-            episode_log_path=episode_log,
-            decision_log_path=decision_log,
-            checkpoint_path=ckpt,
             # n_parallel_envs = 25, 
             n_test=num_exp,
-            n_parallel_envs=min(
-                num_exp,
-                # cfg.task.env_runner.get('n_parallel_envs', num_exp)
-                4,
-            ),
-            n_test_vis=min(
-                num_exp,
-                num_videos if num_videos is not None
-                else cfg.task.env_runner.get('n_test_vis', num_exp)
-            )
+            test_start_seed=test_start_seed
         )
-        runner_log = env_runner.run(policy)
-        env_runner.close()
+        try:
+            runner_log = env_runner.run(policy)
+        finally:
+            env_runner.close()
+        if fusion:
+            json.dump(fusion_provenance, open(os.path.join(output_dir, 'fusion_config.json'), 'w'), indent=2)
+            json.dump(policy.trace, open(os.path.join(output_dir, 'fusion_trace.json'), 'w'), indent=2)
         
         for key, value in runner_log.items():
             if isinstance(value, wandb.sdk.data_types.video.Video):
@@ -330,10 +295,9 @@ def eval_policy_sim(checkpoint, output_dir, num_exp, num_videos, device, update,
             'checkpoint': ckpt,
             'num_exp': num_exp,
             'dropout_obs': ','.join(dropout_obs),
-            'test_start_seed': test_start_seed,
-            'diffusion_seed': diffusion_seed,
-            'deterministic': deterministic,
         }
+        if fusion:
+            json_log['fusion'] = fusion_provenance
         
         for key, value in runner_log.items():
             if isinstance(value, list):

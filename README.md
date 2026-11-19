@@ -44,6 +44,9 @@ If you use this work in your research, please cite:
 
 ## Project Structure
 
+For RGB/PCD expert training with fixed episode splits and held-out data, see
+[RGB / PCD Expert Training](RGB_PCD_EXPERT_TRAINING.md).
+
 This project is organized into several key directories:
 
 - [`modular_policy/`](modular_policy/): Contains the core policy implementation, including models, environments, and training/evaluation scripts.
@@ -56,31 +59,33 @@ This project is organized into several key directories:
 
 ### Automated Setup (Recommended)
 
-For **local Linux** systems:
+For **local Linux systems with an RTX 50 series GPU** (including RTX 5090):
 
 ```bash
-./setup.sh
+bash setup_5090.sh
 ```
 
 For **cluster** environments:
 
 ```bash
-./setup.sh --cluster
+bash setup_5090.sh --cluster
 ```
 
 For **real robot** environments:
 
 ```bash
-./setup.sh --real
+bash setup_5090.sh --real
 ```
 
-The script automatically:
+The RTX 50 series setup script:
 
-- ✅ Configures environment variables in `~/.bashrc`
-- ✅ Downloads and installs MuJoCo 210
-- ✅ Downloads and installs CoppeliaSim (local only)
-- ✅ Creates conda environment with all dependencies
-- ✅ Installs the package in development mode
+- Uses PyTorch 2.7.1 with CUDA 12.8 and builds PyTorch3D for the detected project toolchain.
+- Keeps Conda package archives, pip downloads, temporary build files, and the PyTorch3D source checkout under this project directory.
+- Creates or updates the `policy-consensus` Conda environment with Miniconda and installs this package in editable mode.
+- Uses a longer pip network timeout and retries for the large CUDA wheels.
+
+MuJoCo 210 and CoppeliaSim are separate simulation components; this environment setup does not download or install them.
+PyTorch3D is built from source because its upstream installation guide currently documents PyTorch support only through 2.4.1; the 2.7.1/CUDA 12.8 build is needed for Blackwell but should be validated on the target machine.
 
 ### Manual Setup
 
@@ -125,20 +130,12 @@ rm -rf CoppeliaSim_Edu_V4_1_0_Ubuntu20_04.tar.xz
 **4. Create conda environment**:
 
 ```bash
-mamba install mamba==1.5.9 -n base -c conda-forge
+# Local RTX 50 series
+bash setup_5090.sh
 
-# Local (simulation)
-mamba env create -f conda_environment.yaml
-
-# Cluster
-mamba env create -f conda_environment_cluster.yaml
-
-# Real robot
-mamba env create -f conda_environment_real.yaml
-
-# Activate and install
-conda activate policy-consensus
-pip install -e .
+# Or select another dependency set
+bash setup_5090.sh --cluster
+bash setup_5090.sh --real
 ```
 
 </details>

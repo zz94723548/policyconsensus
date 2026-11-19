@@ -1,0 +1,20 @@
+defaults:
+  - expert_training
+  - _self_
+
+expert_modality: rgb
+expert_obs_keys: [front_rgb, wrist_rgb, overhead_rgb, joint_positions, gripper_joint_positions]
+
+policy:
+  obs_encoders:
+    - _target_: modular_policy.model.perception.model_factory.create_rgb_encoder
+      _recursive_: false
+      to_use: RobomimicRgbEncoder
+      model_library:
+        RobomimicRgbEncoder:
+          _target_: modular_policy.model.perception.rgb_encoder.RobomimicRgbEncoder
+          shape_meta: ${shape_meta}
+          crop_shape: [84, 84]
+          use_group_norm: true
+          eval_fixed_crop: true
+          share_rgb_model: false

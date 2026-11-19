@@ -1,0 +1,36 @@
+defaults:
+  - _self_
+
+_target_: modular_policy.workspace.train_error_moments.TrainErrorMomentsWorkspace
+cache_dir: output/paired_errors/latest_seed2026
+risk_mode: shared
+history_contexts: 4
+weight_tolerance: 1.0e-8
+resume: false
+
+model:
+  projection_dim: 64
+  hidden_dim: 64
+  head_dim: 32
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+
+training:
+  device: cuda:0
+  seed: 42
+  batch_size: 64
+  num_epochs: 500
+  early_stopping: false
+  min_epochs: 20
+  patience: 30
+  gradient_clip_norm: 1.0
+  snapshot_every: 25
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: output/error_moments/shared_history4_seed42

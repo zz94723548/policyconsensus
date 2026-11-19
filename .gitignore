@@ -32,6 +32,7 @@ demo_data_raw/
 *.swo
 *~
 .cache/
+.deps/
 .pytest_cache/
 
 # Environment files

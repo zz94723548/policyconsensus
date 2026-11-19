@@ -1,0 +1,26 @@
+name: rb-mt4-expert-split
+lazy_eval: true
+
+shape_meta:
+  obs:
+    front_rgb: {shape: [3, 128, 128], type: rgb}
+    wrist_rgb: {shape: [3, 128, 128], type: rgb}
+    overhead_rgb: {shape: [3, 128, 128], type: rgb}
+    fused_pointcloud: {shape: [512, 3], type: pointcloud}
+    joint_positions: {shape: [7], type: robot_state}
+    gripper_joint_positions: {shape: [2], type: robot_state}
+  action:
+    shape: [9]
+
+dataset:
+  _target_: modular_policy.dataset.episode_split_rlbench_dataset.EpisodeSplitRlbenchDataset
+  zarr_path: data/rlbench/mt4_expert_200.zarr
+  split_manifest: ${data_split_manifest}
+  split: expert_train
+  validation_split: expert_val
+  obs_keys: ${expert_obs_keys}
+  action_key: action
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  image_scale: 1.0

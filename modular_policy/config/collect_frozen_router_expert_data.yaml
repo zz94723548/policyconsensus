@@ -1,0 +1,7 @@
+defaults:
+  - collect_error_moments
+  - _self_
+
+partition: expert_router
+cache_dir: output/paired_errors/router_expert_data_seed2026
+save_errors: false

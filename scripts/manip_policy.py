@@ -28,7 +28,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @hydra.main(
     version_base=None,
     config_path=str(pathlib.Path(__file__).resolve().parent.parent.joinpath("modular_policy", "config")),
-    config_name='train_dp_unet_rgb'  
+    config_name='train_dp_unets_noproj_rgb'  
 )
 def main(cfg: OmegaConf):
     # resolve immediately so all the ${now:} resolvers

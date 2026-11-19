@@ -1,0 +1,15 @@
+defaults:
+  - _self_
+
+_target_: modular_policy.workspace.calibrate_error_moments.CalibrateErrorMomentsWorkspace
+evaluation_only: true
+final_protocol: splits/final_error_moments_protocol.json
+test_cache_dir: output/paired_errors/test_latest_seed2026
+batch_size: 64
+device: cuda:0
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: output/error_moments/final_test_shared_history4_seed42

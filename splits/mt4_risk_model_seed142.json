@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "purpose": "risk_statistics_model_train_val",
+  "source_manifest": "splits/mt4_seed42.json",
+  "source_manifest_sha256": "a872738af35b0c63b4f99105ff2adf715a5a39758fb170be3723c73e51038e80",
+  "seed": 142,
+  "selection_rule": "in original task_order, permute sorted risk_train IDs with numpy default_rng(142); first 5 train, last 2 validation",
+  "task_order": [
+    "open_box",
+    "toilet_seat_up",
+    "open_drawer",
+    "take_umbrella_out_of_umbrella_stand"
+  ],
+  "splits": {
+    "risk_model_train": [
+      0,
+      6,
+      11,
+      12,
+      22,
+      60,
+      72,
+      76,
+      81,
+      95,
+      100,
+      101,
+      118,
+      127,
+      141,
+      167,
+      171,
+      173,
+      183,
+      194
+    ],
+    "risk_model_val": [
+      19,
+      35,
+      79,
+      82,
+      110,
+      119,
+      154,
+      181
+    ]
+  },
+  "by_task": {
+    "open_box": {
+      "risk_model_train": [
+        0,
+        6,
+        11,
+        12,
+        22
+      ],
+      "risk_model_val": [
+        19,
+        35
+      ]
+    },
+    "toilet_seat_up": {
+      "risk_model_train": [
+        60,
+        72,
+        76,
+        81,
+        95
+      ],
+      "risk_model_val": [
+        79,
+        82
+      ]
+    },
+    "open_drawer": {
+      "risk_model_train": [
+        100,
+        101,
+        118,
+        127,
+        141
+      ],
+      "risk_model_val": [
+        110,
+        119
+      ]
+    },
+    "take_umbrella_out_of_umbrella_stand": {
+      "risk_model_train": [
+        167,
+        171,
+        173,
+        183,
+        194
+      ],
+      "risk_model_val": [
+        154,
+        181
+      ]
+    }
+  }
+}

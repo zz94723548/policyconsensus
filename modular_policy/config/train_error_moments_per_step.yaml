@@ -1,0 +1,9 @@
+defaults:
+  - train_error_moments
+  - _self_
+
+risk_mode: per_step
+
+hydra:
+  run:
+    dir: output/error_moments/per_step_history4_seed42

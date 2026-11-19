@@ -1,0 +1,8 @@
+defaults:
+  - collect_error_moments
+  - _self_
+
+partition: test
+final_protocol: splits/final_error_moments_protocol.json
+test_noise_repeats: 8
+cache_dir: output/paired_errors/test_latest_seed2026

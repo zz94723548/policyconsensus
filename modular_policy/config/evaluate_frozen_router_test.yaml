@@ -1,0 +1,11 @@
+defaults:
+  - evaluate_error_moments_test
+  - _self_
+
+router_checkpoint: output/routers/native_mmpc_seed42/checkpoints/best_risk.ckpt
+reference_report: output/error_moments/final_test_shared_history4_seed42/final_test_report.json
+reference_predictions: output/error_moments/final_test_shared_history4_seed42/final_test_predictions.npz
+
+hydra:
+  run:
+    dir: output/eval_matched5_seed42/offline_errors/router

@@ -1,0 +1,12 @@
+defaults:
+  - train_error_moments
+  - _self_
+
+_target_: modular_policy.workspace.train_frozen_router.TrainFrozenRouterWorkspace
+risk_mode: shared
+history_contexts: 1
+model: null
+
+hydra:
+  run:
+    dir: output/routers/native_mmpc_seed42

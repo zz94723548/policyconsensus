@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "purpose": "frozen_final_offline_error_moments",
+  "risk_mode": "shared",
+  "fixed_rgb_weight": 0.6,
+  "seed": 2026,
+  "context_stride": 8,
+  "test_noise_repeats": 8,
+  "files": {
+    "rgb_checkpoint": {
+      "path": "/home/dbdx/NEUZZ/policyconsensus/output/experts/rgb_seed42/checkpoints/latest.ckpt",
+      "sha256": "b5d6e65412be02021401330a5148641cd8088a1c437b1e9e19a2b5b3a4e9cd22"
+    },
+    "pcd_checkpoint": {
+      "path": "/home/dbdx/NEUZZ/policyconsensus/output/experts/pcd_seed42/checkpoints/latest.ckpt",
+      "sha256": "ed0375acc4dea48144f98380101bc80328d9bd2d9222e63dae9d7e9e02adb18d"
+    },
+    "statistics_checkpoint": {
+      "path": "/home/dbdx/NEUZZ/policyconsensus/output/error_moments/shared_history4_seed42/checkpoints/best_risk.ckpt",
+      "sha256": "54270e1579bb6e49cdce370b359dc6fe9be7980fc3a75b3c9e71ef37188686fe"
+    },
+    "calibration": {
+      "path": "/home/dbdx/NEUZZ/policyconsensus/output/error_moments/calibration_shared_history4_seed42/calibration.json",
+      "sha256": "56570a2781aadde576d40c8a3530d415a9360ec69cede7d9d81081e70ab74fde"
+    },
+    "source_manifest": {
+      "path": "/home/dbdx/NEUZZ/policyconsensus/splits/mt4_seed42.json",
+      "sha256": "37a483ed9aff1888c295ac463ae5397073e50133cf5c8cc42ac0bb5fdbf3eb44"
+    },
+    "risk_split": {
+      "path": "/home/dbdx/NEUZZ/policyconsensus/splits/mt4_risk_model_seed142.json",
+      "sha256": "37c6643c8874cf681d25efebce77a3cc8ea1970fca4c77f9abfd339f383165b2"
+    }
+  },
+  "scope": "Final held-out demonstration labels; no retraining, weight search or recalibration"
+}
